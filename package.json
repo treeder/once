@@ -1,0 +1,19 @@
+{
+  "name": "once",
+  "version": "1.0.0",
+  "description": "A function that will only run once. ",
+  "main": "once.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/treeder/once.git"
+  },
+  "author": "treeder",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/treeder/once/issues"
+  },
+  "homepage": "https://github.com/treeder/once#readme"
+}
