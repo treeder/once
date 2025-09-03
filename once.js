@@ -10,7 +10,7 @@ let finished
  */
 export async function once(func, c) {
   if (finished) return finished
-  console.log('once')
   finished = func(c)
-  return finished
+  console.log('once')
+  return await finished
 }
