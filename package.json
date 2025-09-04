@@ -2,6 +2,7 @@
   "name": "once",
   "version": "1.0.3",
   "description": "A function that will only run once. ",
+  "type": "module",
   "main": "once.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
