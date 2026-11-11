@@ -16,17 +16,17 @@ export async function once(func, c) {
   let pending = runs.get(func)
   if (!pending) {
     console.log('once')
-    pending = Promise.resolve()
-      .then(() => func(c))
-      .catch((err) => {
-        if (runs.get(func) === pending) {
-          runs.delete(func)
-        }
-        throw err
-      })
+    pending = (async () => func(c))()
     runs.set(func, pending)
   }
-  return await pending
+  try {
+    return await pending
+  } catch (err) {
+    if (runs.get(func) === pending) {
+      runs.delete(func)
+    }
+    throw err
+  }
 }
 
 /**

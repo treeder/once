@@ -20,19 +20,22 @@ test('executes function once and shares result across sequential and concurrent 
   assert.equal(r3, 'ok:1')
 })
 
-test('clears cached promise on async rejection so subsequent calls retry cleanly', async () => {
+test('clears cached promise on async rejection (including concurrent callers) so subsequent calls retry cleanly', async () => {
   resetOnce()
   let attempts = 0
   const flakyInit = async () => {
     attempts++
+    await new Promise((r) => setTimeout(r, 5))
     if (attempts === 1) {
       throw new Error('D1_ERROR: internal error')
     }
     return 'recovered'
   }
 
-  await assert.rejects(() => once(flakyInit, {}), /D1_ERROR: internal error/)
+  const results = await Promise.allSettled([once(flakyInit, {}), once(flakyInit, {})])
   assert.equal(attempts, 1)
+  assert.equal(results[0].status, 'rejected')
+  assert.equal(results[1].status, 'rejected')
 
   const res = await once(flakyInit, {})
   assert.equal(res, 'recovered')
