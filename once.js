@@ -1,16 +1,43 @@
-
-let finished
+let runs = new WeakMap()
 
 /**
- * 
- * @param {*} func the function that will be executed once and only once. It should accept one argument: the context.
- * @param {*} c the context that will be passed into the function.
- * Include any data or things that the function needs to operate.
- * @returns a Promise
+ * Ensures `func` runs once per isolate/process, sharing the in-flight or resolved
+ * Promise across callers. If `func` throws or rejects, the cached entry is cleared
+ * so subsequent calls can retry instead of permanently poisoning the isolate.
+ *
+ * @param {Function} func The function to execute once. Receives `c` as its argument.
+ * @param {*} c Context passed into `func`.
+ * @returns {Promise<*>}
  */
 export async function once(func, c) {
-  if (finished) return finished
-  finished = func(c)
-  console.log('once')
-  return await finished
+  if (typeof func !== 'function') {
+    throw new TypeError('once expects a function as the first argument')
+  }
+  let pending = runs.get(func)
+  if (!pending) {
+    console.log('once')
+    pending = Promise.resolve()
+      .then(() => func(c))
+      .catch((err) => {
+        if (runs.get(func) === pending) {
+          runs.delete(func)
+        }
+        throw err
+      })
+    runs.set(func, pending)
+  }
+  return await pending
+}
+
+/**
+ * Clears cached execution state for a specific function, or all functions when omitted.
+ *
+ * @param {Function} [func]
+ */
+export function resetOnce(func) {
+  if (func) {
+    runs.delete(func)
+  } else {
+    runs = new WeakMap()
+  }
 }
