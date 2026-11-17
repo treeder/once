@@ -93,8 +93,9 @@ test('evicts unsettled promise when initial request aborts so subsequent request
   const ac1 = new AbortController()
   const c1 = { id: 1, request: { signal: ac1.signal } }
   // Start Request 1 and abort mid-flight
-  void once(init, c1)
+  const p1 = once(init, c1)
   ac1.abort()
+  await assert.rejects(p1, { name: 'AbortError' })
 
   const c2 = { id: 2, request: { signal: new AbortController().signal } }
   const res = await once(init, c2)
@@ -122,10 +123,11 @@ test('concurrent caller detaches and succeeds in its own context if initiating r
   const c1 = { id: 1, request: { signal: ac1.signal } }
   const c2 = { id: 2, request: { signal: new AbortController().signal } }
 
-  void once(init, c1)
+  const p1 = once(init, c1)
   const p2 = once(init, c2)
 
   setTimeout(() => ac1.abort(), 5)
+  await assert.rejects(p1, { name: 'AbortError' })
   const res2 = await p2
   assert.equal(res2, 'from:2')
   assert.equal(calls, 2)
@@ -166,5 +168,68 @@ test('evicts stale unsettled in-flight promise after inFlightTtlMs when no Abort
 
   const res = await once(init, {}, { inFlightTtlMs: 15 })
   assert.equal(res, 'recovered-after-ttl')
+  assert.equal(calls, 2)
+})
+
+test('fails fast without invoking func when initiating signal is already aborted', async () => {
+  resetOnce()
+  let calls = 0
+  const init = async () => {
+    calls++
+    return 'should-not-run'
+  }
+
+  const ac = new AbortController()
+  ac.abort()
+  await assert.rejects(() => once(init, { signal: ac.signal }), { name: 'AbortError' })
+  assert.equal(calls, 0)
+
+  assert.equal(await once(init, {}), 'should-not-run')
+  assert.equal(calls, 1)
+})
+
+test('late resolution from aborted or TTL-evicted run does not overwrite active or cached entry', async () => {
+  resetOnce()
+  let resolveFirst
+  let calls = 0
+  const init = async (c) => {
+    calls++
+    if (calls === 1) {
+      return await new Promise((resolve) => {
+        resolveFirst = resolve
+      })
+    }
+    return `clean:${c.id}`
+  }
+
+  const ac1 = new AbortController()
+  const p1 = once(init, { id: 1, signal: ac1.signal })
+  ac1.abort()
+  await assert.rejects(p1, { name: 'AbortError' })
+
+  assert.equal(await once(init, { id: 2 }), 'clean:2')
+  resolveFirst('tainted:1')
+  await new Promise((r) => setTimeout(r, 5))
+
+  assert.equal(await once(init, { id: 3 }), 'clean:2')
+  assert.equal(calls, 2)
+})
+
+test('concurrent caller waiting before inFlightTtlMs wakes up and retries when entry becomes stale', async () => {
+  resetOnce()
+  let calls = 0
+  const init = async (c) => {
+    calls++
+    if (calls === 1) {
+      return await new Promise(() => {})
+    }
+    return `recovered:${c.id}`
+  }
+
+  void once(init, { id: 1 }, { inFlightTtlMs: 20 })
+  await new Promise((r) => setTimeout(r, 5))
+
+  const res = await once(init, { id: 2 }, { inFlightTtlMs: 20 })
+  assert.equal(res, 'recovered:2')
   assert.equal(calls, 2)
 })

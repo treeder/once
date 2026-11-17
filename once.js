@@ -8,6 +8,12 @@ function getSignal(c) {
   return signal && typeof signal === 'object' && 'aborted' in signal ? signal : null
 }
 
+function toAbortError(signal) {
+  return signal?.reason !== undefined
+    ? signal.reason
+    : new DOMException('The operation was aborted.', 'AbortError')
+}
+
 function getWaitUntil(c) {
   if (typeof c?.waitUntil === 'function') return c.waitUntil.bind(c)
   if (typeof c?.executionCtx?.waitUntil === 'function') return c.executionCtx.waitUntil.bind(c.executionCtx)
@@ -22,40 +28,53 @@ function isStaleEntry(entry, ttlMs) {
   return false
 }
 
-function waitForEntry(entry, callerSignal) {
+function waitForEntry(entry, callerSignal, ttlMs) {
   if (entry.aborted || entry.signal?.aborted) {
     return Promise.resolve(ABORTED_SENTINEL)
   }
+  const remainingMs = Number.isFinite(ttlMs)
+    ? Math.min(0x7fffffff, Math.max(0, ttlMs - (Date.now() - entry.startedAt)))
+    : null
+  if (remainingMs === 0) {
+    return Promise.resolve(ABORTED_SENTINEL)
+  }
+
   return new Promise((resolve, reject) => {
     let settled = false
+    let ttlTimer = null
     const cleanup = () => {
-      entry.abortListeners.delete(onCreatorAbort)
+      if (ttlTimer !== null) {
+        clearTimeout(ttlTimer)
+        ttlTimer = null
+      }
+      entry.abortListeners.delete(finishAbort)
       if (callerSignal && typeof callerSignal.removeEventListener === 'function') {
         try {
-          callerSignal.removeEventListener('abort', onCallerAbort)
+          callerSignal.removeEventListener('abort', finishAbort)
         } catch {}
       }
     }
-    const onCreatorAbort = () => {
-      if (settled) return
-      settled = true
-      cleanup()
-      resolve(ABORTED_SENTINEL)
-    }
-    const onCallerAbort = () => {
+    const finishAbort = () => {
       if (settled) return
       settled = true
       cleanup()
       resolve(ABORTED_SENTINEL)
     }
 
-    entry.abortListeners.add(onCreatorAbort)
+    entry.abortListeners.add(finishAbort)
     if (callerSignal && typeof callerSignal.addEventListener === 'function') {
       if (callerSignal.aborted) {
-        onCallerAbort()
+        finishAbort()
         return
       }
-      callerSignal.addEventListener('abort', onCallerAbort, { once: true })
+      callerSignal.addEventListener('abort', finishAbort, { once: true })
+    }
+
+    if (remainingMs !== null) {
+      ttlTimer = setTimeout(() => {
+        ttlTimer = null
+        finishAbort()
+      }, remainingMs)
     }
 
     entry.promise.then(
@@ -115,10 +134,10 @@ export async function once(func, c, options) {
 
     if (entry) {
       const callerSignal = getSignal(c)
-      const outcome = await waitForEntry(entry, callerSignal)
+      const outcome = await waitForEntry(entry, callerSignal, ttlMs)
       if (outcome === ABORTED_SENTINEL) {
         if (callerSignal?.aborted) {
-          throw callerSignal.reason || new DOMException('The operation was aborted.', 'AbortError')
+          throw toAbortError(callerSignal)
         }
         continue
       }
@@ -126,11 +145,15 @@ export async function once(func, c, options) {
     }
 
     const signal = getSignal(c)
+    if (signal?.aborted) {
+      throw toAbortError(signal)
+    }
+
     const current = {
       done: false,
       promise: null,
       signal,
-      aborted: Boolean(signal?.aborted),
+      aborted: false,
       startedAt: Date.now(),
       abortListeners: new Set(),
     }
@@ -147,19 +170,19 @@ export async function once(func, c, options) {
       }
     }
 
-    if (signal && !signal.aborted && typeof signal.addEventListener === 'function') {
+    if (signal && typeof signal.addEventListener === 'function') {
       signal.addEventListener('abort', onAbort, { once: true })
     }
 
-    if (!current.aborted) {
-      runs.set(func, current)
-    }
+    runs.set(func, current)
 
     console.log('once')
     current.promise = (async () => {
       try {
         const value = await func(c)
-        runs.set(func, { done: true, value })
+        if (runs.get(func) === current && !current.aborted) {
+          runs.set(func, { done: true, value })
+        }
         return value
       } catch (err) {
         if (runs.get(func) === current) {
@@ -183,7 +206,16 @@ export async function once(func, c, options) {
       } catch {}
     }
 
-    return await current.promise
+    if (!signal) {
+      return await current.promise
+    }
+
+    current.promise.catch(() => {})
+    const outcome = await waitForEntry(current, null, Infinity)
+    if (outcome === ABORTED_SENTINEL) {
+      throw toAbortError(signal)
+    }
+    return outcome
   }
 }
 
