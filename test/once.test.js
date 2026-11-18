@@ -77,3 +77,182 @@ test('tracks distinct functions independently', async () => {
   assert.equal(aCount, 1)
   assert.equal(bCount, 1)
 })
+
+test('evicts unsettled promise when initial request aborts so subsequent requests never hang', async () => {
+  resetOnce()
+  let calls = 0
+  const init = async (c) => {
+    calls++
+    if (calls === 1) {
+      // Simulate Cloudflare Workers request IoContext ending without ever settling its pending promises
+      return await new Promise(() => {})
+    }
+    return `ready:${c.id}`
+  }
+
+  const ac1 = new AbortController()
+  const c1 = { id: 1, request: { signal: ac1.signal } }
+  // Start Request 1 and abort mid-flight
+  const p1 = once(init, c1)
+  ac1.abort()
+  await assert.rejects(p1, { name: 'AbortError' })
+
+  const c2 = { id: 2, request: { signal: new AbortController().signal } }
+  const res = await once(init, c2)
+  assert.equal(res, 'ready:2')
+  assert.equal(calls, 2)
+
+  // Subsequent warm calls return cached value without re-running
+  assert.equal(await once(init, { id: 3 }), 'ready:2')
+  assert.equal(calls, 2)
+})
+
+test('concurrent caller detaches and succeeds in its own context if initiating request aborts mid-flight', async () => {
+  resetOnce()
+  let calls = 0
+  const init = async (c) => {
+    calls++
+    if (c.id === 1) {
+      return await new Promise(() => {})
+    }
+    await new Promise((r) => setTimeout(r, 5))
+    return `from:${c.id}`
+  }
+
+  const ac1 = new AbortController()
+  const c1 = { id: 1, request: { signal: ac1.signal } }
+  const c2 = { id: 2, request: { signal: new AbortController().signal } }
+
+  const p1 = once(init, c1)
+  const p2 = once(init, c2)
+
+  setTimeout(() => ac1.abort(), 5)
+  await assert.rejects(p1, { name: 'AbortError' })
+  const res2 = await p2
+  assert.equal(res2, 'from:2')
+  assert.equal(calls, 2)
+})
+
+test('registers waitUntil and swallows rejections on waitUntil promise', async () => {
+  resetOnce()
+  const waitUntilPromises = []
+  const c = {
+    waitUntil: (p) => waitUntilPromises.push(p),
+  }
+
+  await assert.rejects(
+    () =>
+      once(async () => {
+        throw new Error('transient failure')
+      }, c),
+    /transient failure/,
+  )
+
+  assert.equal(waitUntilPromises.length, 1)
+  await assert.doesNotReject(() => Promise.all(waitUntilPromises))
+})
+
+test('evicts stale unsettled in-flight promise after inFlightTtlMs when no AbortSignal is present', async () => {
+  resetOnce()
+  let calls = 0
+  const init = async () => {
+    calls++
+    if (calls === 1) {
+      return await new Promise(() => {})
+    }
+    return 'recovered-after-ttl'
+  }
+
+  void once(init, {}, { inFlightTtlMs: 15 })
+  await new Promise((r) => setTimeout(r, 25))
+
+  const res = await once(init, {}, { inFlightTtlMs: 15 })
+  assert.equal(res, 'recovered-after-ttl')
+  assert.equal(calls, 2)
+})
+
+test('fails fast without invoking func when initiating signal is already aborted', async () => {
+  resetOnce()
+  let calls = 0
+  const init = async () => {
+    calls++
+    return 'should-not-run'
+  }
+
+  const ac = new AbortController()
+  ac.abort()
+  await assert.rejects(() => once(init, { signal: ac.signal }), { name: 'AbortError' })
+  assert.equal(calls, 0)
+
+  assert.equal(await once(init, {}), 'should-not-run')
+  assert.equal(calls, 1)
+})
+
+test('late resolution from aborted or TTL-evicted run does not overwrite active or cached entry', async () => {
+  resetOnce()
+  let resolveFirst
+  let calls = 0
+  const init = async (c) => {
+    calls++
+    if (calls === 1) {
+      return await new Promise((resolve) => {
+        resolveFirst = resolve
+      })
+    }
+    return `clean:${c.id}`
+  }
+
+  const ac1 = new AbortController()
+  const p1 = once(init, { id: 1, signal: ac1.signal })
+  ac1.abort()
+  await assert.rejects(p1, { name: 'AbortError' })
+
+  assert.equal(await once(init, { id: 2 }), 'clean:2')
+  resolveFirst('tainted:1')
+  await new Promise((r) => setTimeout(r, 5))
+
+  assert.equal(await once(init, { id: 3 }), 'clean:2')
+  assert.equal(calls, 2)
+})
+
+test('concurrent caller waiting before inFlightTtlMs wakes up and retries when entry becomes stale', async () => {
+  resetOnce()
+  let calls = 0
+  const init = async (c) => {
+    calls++
+    if (calls === 1) {
+      return await new Promise(() => {})
+    }
+    return `recovered:${c.id}`
+  }
+
+  void once(init, { id: 1 }, { inFlightTtlMs: 20 })
+  await new Promise((r) => setTimeout(r, 5))
+
+  const res = await once(init, { id: 2 }, { inFlightTtlMs: 20 })
+  assert.equal(res, 'recovered:2')
+  assert.equal(calls, 2)
+})
+
+test('gracefully handles throwing executionCtx getter (e.g. Hono in Node/tests) and falls back to ctx.waitUntil', async () => {
+  resetOnce()
+  const honoNoCtx = {
+    get executionCtx() {
+      throw new Error('This context has no ExecutionContext')
+    },
+  }
+  assert.equal(await once(async () => 'ok-no-ctx', honoNoCtx), 'ok-no-ctx')
+
+  const waited = []
+  const honoFallbackCtx = {
+    get executionCtx() {
+      throw new Error('This context has no ExecutionContext')
+    },
+    ctx: {
+      waitUntil: (p) => waited.push(p),
+    },
+  }
+  assert.equal(await once(async () => 'ok-fallback', honoFallbackCtx), 'ok-fallback')
+  assert.equal(waited.length, 1)
+  await Promise.all(waited)
+})
