@@ -3,9 +3,20 @@ let runs = new WeakMap()
 const DEFAULT_INFLIGHT_TTL_MS = 30_000
 const ABORTED_SENTINEL = Symbol('once.aborted')
 
+const now =
+  typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? () => performance.now()
+    : () => Date.now()
+
 function getSignal(c) {
-  const signal = c?.request?.signal || c?.req?.raw?.signal || c?.signal || null
-  return signal && typeof signal === 'object' && 'aborted' in signal ? signal : null
+  if (!c || typeof c !== 'object') return null
+  for (const read of [() => c.request?.signal, () => c.req?.raw?.signal, () => c.signal]) {
+    try {
+      const signal = read()
+      if (signal && typeof signal === 'object' && 'aborted' in signal) return signal
+    } catch {}
+  }
+  return null
 }
 
 function toAbortError(signal) {
@@ -15,16 +26,20 @@ function toAbortError(signal) {
 }
 
 function getWaitUntil(c) {
-  if (typeof c?.waitUntil === 'function') return c.waitUntil.bind(c)
-  if (typeof c?.executionCtx?.waitUntil === 'function') return c.executionCtx.waitUntil.bind(c.executionCtx)
-  if (typeof c?.ctx?.waitUntil === 'function') return c.ctx.waitUntil.bind(c.ctx)
+  if (!c || typeof c !== 'object') return null
+  for (const getTarget of [() => c, () => c.executionCtx, () => c.ctx]) {
+    try {
+      const target = getTarget()
+      if (typeof target?.waitUntil === 'function') return target.waitUntil.bind(target)
+    } catch {}
+  }
   return null
 }
 
 function isStaleEntry(entry, ttlMs) {
   if (!entry || entry.done) return false
   if (entry.aborted || entry.signal?.aborted) return true
-  if (Date.now() - entry.startedAt >= ttlMs) return true
+  if (now() - entry.startedAt >= ttlMs) return true
   return false
 }
 
@@ -33,7 +48,7 @@ function waitForEntry(entry, callerSignal, ttlMs) {
     return Promise.resolve(ABORTED_SENTINEL)
   }
   const remainingMs = Number.isFinite(ttlMs)
-    ? Math.min(0x7fffffff, Math.max(0, ttlMs - (Date.now() - entry.startedAt)))
+    ? Math.min(0x7fffffff, Math.max(0, ttlMs - (now() - entry.startedAt)))
     : null
   if (remainingMs === 0) {
     return Promise.resolve(ABORTED_SENTINEL)
@@ -154,7 +169,7 @@ export async function once(func, c, options) {
       promise: null,
       signal,
       aborted: false,
-      startedAt: Date.now(),
+      startedAt: now(),
       abortListeners: new Set(),
     }
 

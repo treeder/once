@@ -233,3 +233,26 @@ test('concurrent caller waiting before inFlightTtlMs wakes up and retries when e
   assert.equal(res, 'recovered:2')
   assert.equal(calls, 2)
 })
+
+test('gracefully handles throwing executionCtx getter (e.g. Hono in Node/tests) and falls back to ctx.waitUntil', async () => {
+  resetOnce()
+  const honoNoCtx = {
+    get executionCtx() {
+      throw new Error('This context has no ExecutionContext')
+    },
+  }
+  assert.equal(await once(async () => 'ok-no-ctx', honoNoCtx), 'ok-no-ctx')
+
+  const waited = []
+  const honoFallbackCtx = {
+    get executionCtx() {
+      throw new Error('This context has no ExecutionContext')
+    },
+    ctx: {
+      waitUntil: (p) => waited.push(p),
+    },
+  }
+  assert.equal(await once(async () => 'ok-fallback', honoFallbackCtx), 'ok-fallback')
+  assert.equal(waited.length, 1)
+  await Promise.all(waited)
+})
